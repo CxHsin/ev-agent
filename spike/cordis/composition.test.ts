@@ -68,6 +68,9 @@ describe('Cordis Composition decision spike', () => {
     const baseline = compositionWithPlugin('baseline', (ctx) => {
       ctx.effect('baseline-effect')
     })
+    const replacement = compositionWithPlugin('replacement', (ctx) => {
+      ctx.effect('replacement-effect')
+    })
     const candidate = compositionWithPlugin('candidate', (ctx) => {
       ctx.effect('candidate-effect')
       throw new Error('candidate setup failed')
@@ -76,15 +79,27 @@ describe('Cordis Composition decision spike', () => {
     await runtime.activate(baseline)
     expect(runtime.activeEffectCount()).toBe(1)
 
+    const switched = await runtime.activate(replacement)
+
+    expect(switched.status).toBe('active')
+    expect(runtime.currentId()).toBe('replacement')
+    expect(runtime.activeEffectCount()).toBe(1)
+
     const failed = await runtime.activate(candidate)
 
     expect(failed.status).toBe('failed')
-    expect(runtime.currentId()).toBe('baseline')
+    expect(runtime.currentId()).toBe('replacement')
+    expect(runtime.activeEffectCount()).toBe(1)
+
+    const failedAgain = await runtime.activate(candidate)
+
+    expect(failedAgain.status).toBe('failed')
+    expect(runtime.currentId()).toBe('replacement')
     expect(runtime.activeEffectCount()).toBe(1)
 
     for (let index = 0; index < 1000; index += 1) {
       await runtime.deactivate()
-      await runtime.activate(baseline)
+      await runtime.activate(replacement)
     }
     await runtime.deactivate()
 
@@ -144,9 +159,9 @@ function compositionWithPlugin(
     id,
     ...(deferredDependencies === undefined ? {} : { deferredDependencies }),
     plugins: [{
-        id: `${id}-plugin`,
-        ...(requires === undefined ? {} : { requires }),
-        ...(setup === undefined ? {} : { setup }),
-      }],
+      id: `${id}-plugin`,
+      ...(requires === undefined ? {} : { requires }),
+      ...(setup === undefined ? {} : { setup }),
+    }],
   }
 }

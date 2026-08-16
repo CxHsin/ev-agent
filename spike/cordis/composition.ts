@@ -54,7 +54,6 @@ interface Candidate {
   readonly missing: Set<string>
 }
 
-const ACTIVE = FiberState.ACTIVE
 const PENDING = FiberState.PENDING
 
 export function createCompositionRuntime(): CompositionRuntime {
