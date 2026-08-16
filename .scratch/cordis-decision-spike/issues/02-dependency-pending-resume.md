@@ -4,10 +4,10 @@
 
 **Blocked by:** 01 — 建立 Composition decision spike 边界与可观测测试夹具
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] 未满足依赖不会被错误地视为已激活
-- [ ] 依赖补齐后 pending composition 可以恢复并完成激活
-- [ ] 永久缺失依赖产生稳定、可诊断的失败结果
-- [ ] pending、resume 和 failure 都有自动化成功/失败路径测试
-- [ ] 失败路径不会留下部分注册效果或错误的 current composition
+- [x] 未满足依赖不会被错误地视为已激活
+- [x] 依赖补齐后 pending composition 可以恢复并完成激活
+- [x] 永久缺失依赖产生稳定、可诊断的失败结果
+- [x] pending、resume 和 failure 都有自动化成功/失败路径测试
+- [x] 失败路径不会留下部分注册效果或错误的 current composition

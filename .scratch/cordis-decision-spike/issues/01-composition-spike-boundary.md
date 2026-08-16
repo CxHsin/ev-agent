@@ -4,10 +4,10 @@
 
 **Blocked by:** None — can start immediately
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] 原型可以加载和卸载最小 Plugin composition
-- [ ] 测试夹具可以观察激活状态、当前 composition 身份、注册效果数量和 scope-local 状态
-- [ ] Agent-domain 和 capability-facing 结果不暴露 Cordis 类型
-- [ ] 测试在无网络、无凭据环境中可重复运行
-- [ ] 原型保持可丢弃，不承诺生产 package 结构
+- [x] 原型可以加载和卸载最小 Plugin composition
+- [x] 测试夹具可以观察激活状态、当前 composition 身份、注册效果数量和 scope-local 状态
+- [x] Agent-domain 和 capability-facing 结果不暴露 Cordis 类型
+- [x] 测试在无网络、无凭据环境中可重复运行
+- [x] 原型保持可丢弃，不承诺生产 package 结构

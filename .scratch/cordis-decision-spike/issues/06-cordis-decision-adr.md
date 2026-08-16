@@ -4,10 +4,10 @@
 
 **Blocked by:** 02 — 验证 dependency pending/resume; 03 — 验证完整 effect disposal; 04 — 验证 Agent-scope isolation; 05 — 验证失败配置的事务性 rollback
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] ADR 包含四个行为的自动化结果和失败模式
-- [ ] ADR 记录重复运行的测量结果和残留效果指标
-- [ ] ADR 明确 adopt、adopt-with-constraints 或 reject 之一
-- [ ] 任何约束都明确落在 Composition 边界或生命周期规则上
-- [ ] ADR 保留后续 Phase 1 的可执行 exit criteria
+- [x] ADR 包含四个行为的自动化结果和失败模式
+- [x] ADR 记录重复运行的测量结果和残留效果指标
+- [x] ADR 明确 adopt、adopt-with-constraints 或 reject 之一
+- [x] 任何约束都明确落在 Composition 边界或生命周期规则上
+- [x] ADR 保留后续 Phase 1 的可执行 exit criteria
