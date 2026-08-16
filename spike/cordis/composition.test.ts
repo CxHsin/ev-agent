@@ -23,6 +23,7 @@ describe('Cordis Composition decision spike', () => {
 
     expect(result.status).toBe('active')
     expect(runtime.currentId()).toBe('baseline')
+    expect(runtime.currentVersion()).toBe('1')
     expect(runtime.activeEffectCount()).toBe(1)
 
     await runtime.deactivate()
@@ -70,7 +71,7 @@ describe('Cordis Composition decision spike', () => {
     })
     const replacement = compositionWithPlugin('replacement', (ctx) => {
       ctx.effect('replacement-effect')
-    })
+    }, undefined, undefined, '2')
     const candidate = compositionWithPlugin('candidate', (ctx) => {
       ctx.effect('candidate-effect')
       throw new Error('candidate setup failed')
@@ -83,6 +84,7 @@ describe('Cordis Composition decision spike', () => {
 
     expect(switched.status).toBe('active')
     expect(runtime.currentId()).toBe('replacement')
+    expect(runtime.currentVersion()).toBe('2')
     expect(runtime.activeEffectCount()).toBe(1)
 
     const failed = await runtime.activate(candidate)
@@ -110,24 +112,37 @@ describe('Cordis Composition decision spike', () => {
     runtime = createCompositionRuntime()
     await runtime.activate(compositionWithPlugin('scoped'))
 
-    const first = runtime.openAgentScope('first')
-    const second = runtime.openAgentScope('second')
-    first.set('focus', 'one')
-    second.set('focus', 'two')
-    first.effect('first-effect')
-    second.effect('second-effect')
+    const first = await runtime.openAgentScope('first')
+    const second = await runtime.openAgentScope('second')
+    await Promise.all([
+      Promise.resolve().then(() => {
+        first.set('focus', 'one')
+        first.effect('first-effect')
+      }),
+      Promise.resolve().then(() => {
+        second.set('focus', 'two')
+        second.effect('second-effect')
+      }),
+    ])
 
     expect(first.get('focus')).toBe('one')
     expect(second.get('focus')).toBe('two')
     expect(first.effectCount()).toBe(1)
     expect(second.effectCount()).toBe(1)
 
-    await first.dispose()
+    await Promise.all([
+      first.dispose(),
+      Promise.resolve().then(() => {
+        second.set('focus', 'two-updated')
+        second.effect('second-concurrent-effect')
+      }),
+    ])
 
     expect(first.effectCount()).toBe(0)
-    expect(second.get('focus')).toBe('two')
-    expect(second.effectCount()).toBe(1)
+    expect(second.get('focus')).toBe('two-updated')
+    expect(second.effectCount()).toBe(2)
     expect(() => first.set('focus', 'after-dispose')).toThrow(/disposed/)
+    expect(() => first.get('focus')).toThrow(/disposed/)
     expect(() => first.effect('after-dispose')).toThrow(/disposed/)
   })
 
@@ -154,9 +169,11 @@ function compositionWithPlugin(
   setup?: PluginDefinition['setup'],
   requires?: readonly string[],
   deferredDependencies?: readonly string[],
+  version = '1',
 ): CompositionDefinition {
   return {
     id,
+    version,
     ...(deferredDependencies === undefined ? {} : { deferredDependencies }),
     plugins: [{
       id: `${id}-plugin`,

@@ -26,6 +26,7 @@ export interface PluginDefinition {
 
 export interface CompositionDefinition {
   readonly id: string
+  readonly version: string
   readonly plugins: readonly PluginDefinition[]
   /** Dependencies that are expected to be supplied after initial activation. */
   readonly deferredDependencies?: readonly string[]
@@ -42,8 +43,9 @@ export interface CompositionRuntime {
   deactivate(): Promise<void>
   dispose(): Promise<void>
   currentId(): string | undefined
+  currentVersion(): string | undefined
   activeEffectCount(): number
-  openAgentScope(id: string): AgentScope
+  openAgentScope(id: string): Promise<AgentScope>
 }
 
 interface Candidate {
@@ -54,6 +56,7 @@ interface Candidate {
   readonly missing: Set<string>
 }
 
+const ACTIVE = FiberState.ACTIVE
 const PENDING = FiberState.PENDING
 
 export function createCompositionRuntime(): CompositionRuntime {
@@ -77,9 +80,7 @@ class CordisCompositionRuntime implements CompositionRuntime {
     const candidate = await this.createCandidate(definition)
     const result = await this.settleCandidate(candidate)
     if (result.status === 'active') {
-      const previous = this.current
-      this.current = candidate
-      await this.disposeCandidate(previous)
+      await this.publishCandidate(candidate)
       return result
     }
     if (result.status === 'pending') {
@@ -107,10 +108,7 @@ class CordisCompositionRuntime implements CompositionRuntime {
 
     const result = await this.settleCandidate(candidate)
     if (result.status === 'active') {
-      this.pending = undefined
-      const previous = this.current
-      this.current = candidate
-      await this.disposeCandidate(previous)
+      await this.publishCandidate(candidate)
       return result
     }
     if (result.status === 'failed') {
@@ -136,21 +134,28 @@ class CordisCompositionRuntime implements CompositionRuntime {
     return this.current?.definition.id
   }
 
+  currentVersion(): string | undefined {
+    return this.current?.definition.version
+  }
+
   activeEffectCount(): number {
     return this.trackedEffects.size
   }
 
-  openAgentScope(id: string): AgentScope {
+  async openAgentScope(id: string): Promise<AgentScope> {
     const candidate = this.current
     if (!candidate) throw new Error('cannot open an Agent scope without an active composition')
 
-    const context = candidate.group.ctx.isolate('agent', Symbol(id))
+    const context = candidate.group.ctx.isolate('agent-state', Symbol(id))
+    const values = new Map<string, unknown>()
     const fiber = context.plugin({
       name: `agent:${id}`,
-      apply: () => undefined,
+      apply: (ctx: Context) => {
+        ctx.provide('agent-state', values)
+      },
     })
+    await fiber.await()
     candidate.scopes.add(fiber)
-    const values = new Map<string, unknown>()
     const scopeEffects = new Set<symbol>()
     let disposed = false
 
@@ -158,10 +163,12 @@ class CordisCompositionRuntime implements CompositionRuntime {
       id,
       set<T>(key: string, value: T): void {
         if (disposed) throw new Error(`Agent scope "${id}" is disposed`)
-        values.set(key, value)
+        const state = fiber.ctx.get('agent-state', false) as Map<string, unknown> | undefined
+        state?.set(key, value)
       },
       get<T>(key: string): T | undefined {
-        return values.get(key) as T | undefined
+        if (disposed) throw new Error(`Agent scope "${id}" is disposed`)
+        return (fiber.ctx.get('agent-state', false) as Map<string, unknown> | undefined)?.get(key) as T | undefined
       },
       effect: (label: string): void => {
         if (disposed) throw new Error(`Agent scope "${id}" is disposed`)
@@ -183,7 +190,7 @@ class CordisCompositionRuntime implements CompositionRuntime {
 
   private async createCandidate(definition: CompositionDefinition): Promise<Candidate> {
     const group = this.root.plugin({
-      name: `composition:${definition.id}`,
+      name: `composition:${definition.id}@${definition.version}`,
       apply: () => undefined,
     })
     await group.await()
@@ -224,15 +231,17 @@ class CordisCompositionRuntime implements CompositionRuntime {
     }
 
     await Promise.all(candidate.plugins.map((fiber) => fiber.await().catch(() => undefined)))
-    for (const [index, definition] of candidate.definition.plugins.entries()) {
-      const fiber = candidate.plugins[index]
-      if (!fiber) continue
+    let hasPending = false
+    for (const [index, fiber] of candidate.plugins.entries()) {
       if (fiber.state === PENDING) {
-        for (const dependency of definition.requires ?? []) {
+        hasPending = true
+        const definition = candidate.definition.plugins[index]
+        for (const dependency of definition?.requires ?? []) {
           if (fiber.ctx.get(dependency, false) === undefined) candidate.missing.add(dependency)
         }
+        continue
       }
-      if (fiber.state === FiberState.FAILED) {
+      if (fiber.state !== ACTIVE) {
         return { status: 'failed', reason: 'activation_failed' }
       }
     }
@@ -243,6 +252,7 @@ class CordisCompositionRuntime implements CompositionRuntime {
       if (permanent.length > 0) return { status: 'failed', reason: 'missing_dependency' }
       return { status: 'pending', missing: unresolved }
     }
+    if (hasPending) return { status: 'pending', missing: unresolved }
     return { status: 'active' }
   }
 
@@ -259,5 +269,12 @@ class CordisCompositionRuntime implements CompositionRuntime {
     if (!candidate) return
     await Promise.all([...candidate.scopes].map((scope) => scope.dispose()))
     await candidate.group.dispose()
+  }
+
+  private async publishCandidate(candidate: Candidate): Promise<void> {
+    this.pending = undefined
+    const previous = this.current
+    this.current = candidate
+    await this.disposeCandidate(previous)
   }
 }
