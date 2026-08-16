@@ -4,9 +4,9 @@ import {
   type CompositionDefinition,
   type CompositionRuntime,
   type PluginDefinition,
-} from './composition.js'
+} from './index.js'
 
-describe('Cordis Composition decision spike', () => {
+describe('Composition lifecycle acceptance', () => {
   let runtime: CompositionRuntime | undefined
 
   afterEach(async () => {
@@ -223,12 +223,17 @@ describe('Cordis Composition decision spike', () => {
     const baseline = compositionWithPlugin('baseline', (ctx) => {
       ctx.effect('baseline-effect')
     })
-    const invalid = compositionWithPlugin('invalid', (ctx) => {
-      ctx.effect('invalid-effect')
-    })
+    const invalid: CompositionDefinition = {
+      ...compositionWithPlugin('invalid', (ctx) => {
+        ctx.effect('invalid-effect')
+      }),
+      validateConfig: (config) => {
+        if (config !== 'approved') throw new Error('invalid configuration')
+      },
+    }
 
     await runtime.activate(baseline)
-    const result = await runtime.activate(invalid, { valid: false })
+    const result = await runtime.activate(invalid, 'rejected')
 
     expect(result).toMatchObject({ status: 'failed', reason: 'invalid_configuration' })
     expect(runtime.currentId()).toBe('baseline')

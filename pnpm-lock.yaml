@@ -7,10 +7,6 @@ settings:
 importers:
 
   .:
-    dependencies:
-      cordis:
-        specifier: 4.0.0-rc.8
-        version: 4.0.0-rc.8
     devDependencies:
       '@types/node':
         specifier: ^24.0.0
@@ -21,6 +17,31 @@ importers:
       vitest:
         specifier: ^3.2.0
         version: 3.2.7(@types/node@24.13.3)
+
+  packages/composition:
+    dependencies:
+      '@ev-agent/plugin-sdk':
+        specifier: workspace:*
+        version: link:../plugin-sdk
+      cordis:
+        specifier: 4.0.0-rc.8
+        version: 4.0.0-rc.8
+
+  packages/durability: {}
+
+  packages/execution:
+    dependencies:
+      '@ev-agent/composition':
+        specifier: workspace:*
+        version: link:../composition
+      '@ev-agent/durability':
+        specifier: workspace:*
+        version: link:../durability
+      '@ev-agent/plugin-sdk':
+        specifier: workspace:*
+        version: link:../plugin-sdk
+
+  packages/plugin-sdk: {}
 
 packages:
 

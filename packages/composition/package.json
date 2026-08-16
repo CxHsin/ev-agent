@@ -1,0 +1,13 @@
+{
+  "name": "@ev-agent/composition",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "dependencies": {
+    "@ev-agent/plugin-sdk": "workspace:*",
+    "cordis": "4.0.0-rc.8"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

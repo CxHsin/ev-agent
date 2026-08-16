@@ -1,4 +1,4 @@
-export { createCompositionRuntime } from '../../packages/composition/src/index.js'
+export { createCompositionRuntime } from './runtime.js'
 export type {
   ActivationResult,
   AgentScope,
@@ -7,4 +7,4 @@ export type {
   CompositionRuntime,
   PluginContext,
   PluginDefinition,
-} from '../../packages/composition/src/index.js'
+} from '@ev-agent/plugin-sdk'

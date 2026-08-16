@@ -1,0 +1,14 @@
+{
+  "name": "@ev-agent/execution",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "dependencies": {
+    "@ev-agent/composition": "workspace:*",
+    "@ev-agent/durability": "workspace:*",
+    "@ev-agent/plugin-sdk": "workspace:*"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}
