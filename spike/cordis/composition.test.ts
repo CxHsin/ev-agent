@@ -59,9 +59,53 @@ describe('Cordis Composition decision spike', () => {
 
     const result = await runtime.activate(consumer)
 
-    expect(result).toMatchObject({ status: 'failed', reason: 'missing_dependency' })
+    expect(result).toMatchObject({ status: 'failed', reason: 'missing_dependency', missing: ['never'] })
     expect(runtime.currentId()).toBeUndefined()
     expect(runtime.activeEffectCount()).toBe(0)
+  })
+
+  it('does not run independent Plugin effects while a sibling dependency is pending', async () => {
+    runtime = createCompositionRuntime()
+    const composition = compositionWithPlugins('staged', [
+      {
+        id: 'independent',
+        setup: (ctx) => ctx.effect('must-wait-for-composition'),
+      },
+      {
+        id: 'consumer',
+        requires: ['clock'],
+        setup: (ctx) => ctx.effect(`consumer:${ctx.requireService<string>('clock')}`),
+      },
+    ], ['clock'])
+
+    const pending = await runtime.activate(composition)
+
+    expect(pending).toMatchObject({ status: 'pending', missing: ['clock'] })
+    expect(runtime.activeEffectCount()).toBe(0)
+
+    const active = await runtime.provideService('clock', 'utc')
+
+    expect(active.status).toBe('active')
+    expect(runtime.activeEffectCount()).toBe(2)
+  })
+
+  it('does not resolve a candidate from a sibling composition service', async () => {
+    runtime = createCompositionRuntime()
+    const first = compositionWithPlugin('first', (ctx) => {
+      ctx.effect(`first:${ctx.requireService<string>('clock')}`)
+    }, ['clock'], ['clock'])
+    const second = compositionWithPlugin('second', (ctx) => {
+      ctx.effect(`second:${ctx.requireService<string>('clock')}`)
+    }, ['clock'], ['clock'])
+
+    await runtime.activate(first)
+    await runtime.provideService('clock', 'utc')
+
+    const pending = await runtime.activate(second)
+
+    expect(pending).toMatchObject({ status: 'pending', missing: ['clock'] })
+    expect(runtime.currentId()).toBe('first')
+    expect(runtime.activeEffectCount()).toBe(1)
   })
 
   it('disposes effects on replacement, failed activation, and repeated unload cycles', async () => {
@@ -146,6 +190,34 @@ describe('Cordis Composition decision spike', () => {
     expect(() => first.effect('after-dispose')).toThrow(/disposed/)
   })
 
+  it('keeps Agent state across composition replacement and rejects effects while detached', async () => {
+    runtime = createCompositionRuntime()
+    const firstComposition = compositionWithPlugin('first', (ctx) => {
+      ctx.effect('first-composition-effect')
+    })
+    const secondComposition = compositionWithPlugin('second', (ctx) => {
+      ctx.effect('second-composition-effect')
+    })
+
+    await runtime.activate(firstComposition)
+    const scope = await runtime.openAgentScope('persistent')
+    scope.set('focus', 'long-lived')
+    scope.effect('first-scope-effect')
+
+    await runtime.activate(secondComposition)
+
+    expect(scope.get('focus')).toBe('long-lived')
+    expect(scope.effectCount()).toBe(0)
+    expect(() => scope.effect('detached')).not.toThrow()
+    expect(scope.effectCount()).toBe(1)
+
+    await runtime.deactivate()
+
+    expect(scope.get('focus')).toBe('long-lived')
+    expect(() => scope.effect('after-deactivate')).toThrow(/not attached/)
+    expect(runtime.activeEffectCount()).toBe(0)
+  })
+
   it('rolls back invalid configuration while preserving the working composition', async () => {
     runtime = createCompositionRuntime()
     const baseline = compositionWithPlugin('baseline', (ctx) => {
@@ -180,5 +252,19 @@ function compositionWithPlugin(
       ...(requires === undefined ? {} : { requires }),
       ...(setup === undefined ? {} : { setup }),
     }],
+  }
+}
+
+function compositionWithPlugins(
+  id: string,
+  plugins: readonly PluginDefinition[],
+  deferredDependencies?: readonly string[],
+  version = '1',
+): CompositionDefinition {
+  return {
+    id,
+    version,
+    ...(deferredDependencies === undefined ? {} : { deferredDependencies }),
+    plugins,
   }
 }

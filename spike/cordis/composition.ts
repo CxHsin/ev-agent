@@ -35,7 +35,11 @@ export interface CompositionDefinition {
 export type ActivationResult =
   | { readonly status: 'active' }
   | { readonly status: 'pending'; readonly missing: readonly string[] }
-  | { readonly status: 'failed'; readonly reason: 'invalid_configuration' | 'missing_dependency' | 'activation_failed' }
+  | {
+      readonly status: 'failed'
+      readonly reason: 'invalid_configuration' | 'missing_dependency' | 'activation_failed'
+      readonly missing?: readonly string[]
+    }
 
 export interface CompositionRuntime {
   activate(definition: CompositionDefinition, config?: { readonly valid?: boolean }): Promise<ActivationResult>
@@ -54,6 +58,18 @@ interface Candidate {
   readonly plugins: Fiber[]
   readonly scopes: Set<Fiber>
   readonly missing: Set<string>
+  readonly providedServices: Set<string>
+  readonly servicePrefix: string
+  pluginsStarted: boolean
+}
+
+interface ScopeRecord {
+  readonly id: string
+  readonly values: Map<string, unknown>
+  readonly effects: Set<symbol>
+  disposed: boolean
+  fiber: Fiber | undefined
+  candidate: Candidate | undefined
 }
 
 const ACTIVE = FiberState.ACTIVE
@@ -66,6 +82,8 @@ export function createCompositionRuntime(): CompositionRuntime {
 class CordisCompositionRuntime implements CompositionRuntime {
   private readonly root = new Context()
   private readonly trackedEffects = new Set<symbol>()
+  private readonly scopes = new Map<string, ScopeRecord>()
+  private candidateCounter = 0
   private current: Candidate | undefined
   private pending: Candidate | undefined
 
@@ -95,16 +113,17 @@ class CordisCompositionRuntime implements CompositionRuntime {
   async provideService(name: string, value: unknown): Promise<ActivationResult> {
     const candidate = this.pending
     if (!candidate) {
-      return { status: 'failed', reason: 'missing_dependency' }
+      return { status: 'failed', reason: 'missing_dependency', missing: [name] }
     }
 
     const provider = candidate.group.ctx.plugin({
       name: `service:${name}`,
       apply: (ctx: Context) => {
-        ctx.provide(name, value)
+        ctx.provide(this.serviceName(candidate, name), value)
       },
     })
     candidate.plugins.push(provider)
+    candidate.providedServices.add(name)
 
     const result = await this.settleCandidate(candidate)
     if (result.status === 'active') {
@@ -146,49 +165,29 @@ class CordisCompositionRuntime implements CompositionRuntime {
     const candidate = this.current
     if (!candidate) throw new Error('cannot open an Agent scope without an active composition')
 
-    const context = candidate.group.ctx.isolate('agent-state', Symbol(id))
-    const values = new Map<string, unknown>()
-    const fiber = context.plugin({
-      name: `agent:${id}`,
-      apply: (ctx: Context) => {
-        ctx.provide('agent-state', values)
-      },
-    })
-    await fiber.await()
-    candidate.scopes.add(fiber)
-    const scopeEffects = new Set<symbol>()
-    let disposed = false
+    const existing = this.scopes.get(id)
+    if (existing && !existing.disposed) return this.scopeHandle(existing)
 
-    return {
+    const record: ScopeRecord = {
       id,
-      set<T>(key: string, value: T): void {
-        if (disposed) throw new Error(`Agent scope "${id}" is disposed`)
-        const state = fiber.ctx.get('agent-state', false) as Map<string, unknown> | undefined
-        state?.set(key, value)
-      },
-      get<T>(key: string): T | undefined {
-        if (disposed) throw new Error(`Agent scope "${id}" is disposed`)
-        return (fiber.ctx.get('agent-state', false) as Map<string, unknown> | undefined)?.get(key) as T | undefined
-      },
-      effect: (label: string): void => {
-        if (disposed) throw new Error(`Agent scope "${id}" is disposed`)
-        const token = Symbol(label)
-        scopeEffects.add(token)
-        this.trackEffect(fiber.ctx, label, () => scopeEffects.delete(token))
-      },
-      effectCount: (): number => scopeEffects.size,
-      dispose: async (): Promise<void> => {
-        if (disposed) return
-        disposed = true
-        candidate.scopes.delete(fiber)
-        values.clear()
-        await fiber.dispose()
-        scopeEffects.clear()
-      },
+      values: new Map(),
+      effects: new Set(),
+      disposed: false,
+      fiber: undefined,
+      candidate: undefined,
+    }
+    this.scopes.set(id, record)
+    try {
+      await this.attachScope(record, candidate)
+      return this.scopeHandle(record)
+    } catch (error) {
+      this.scopes.delete(id)
+      throw error
     }
   }
 
   private async createCandidate(definition: CompositionDefinition): Promise<Candidate> {
+    const servicePrefix = `composition:${definition.id}@${definition.version}:${++this.candidateCounter}:`
     const group = this.root.plugin({
       name: `composition:${definition.id}@${definition.version}`,
       apply: () => undefined,
@@ -200,6 +199,9 @@ class CordisCompositionRuntime implements CompositionRuntime {
       plugins: [],
       scopes: new Set(),
       missing: new Set(),
+      providedServices: new Set(),
+      servicePrefix,
+      pluginsStarted: false,
     }
   }
 
@@ -207,18 +209,35 @@ class CordisCompositionRuntime implements CompositionRuntime {
     candidate.missing.clear()
     const deferred = new Set(candidate.definition.deferredDependencies ?? [])
 
-    if (candidate.plugins.length === 0) {
+    if (!candidate.pluginsStarted) {
+      for (const definition of candidate.definition.plugins) {
+        for (const dependency of definition.requires ?? []) {
+          if (!candidate.providedServices.has(dependency)) {
+            candidate.missing.add(dependency)
+          }
+        }
+      }
+
+      const permanent = [...candidate.missing].filter((dependency) => !deferred.has(dependency))
+      if (permanent.length > 0) {
+        return { status: 'failed', reason: 'missing_dependency', missing: permanent }
+      }
+      if (candidate.missing.size > 0) {
+        return { status: 'pending', missing: [...candidate.missing] }
+      }
+
       for (const definition of candidate.definition.plugins) {
         const fiber = candidate.group.ctx.plugin({
           name: definition.id,
-          inject: definition.requires ?? [],
+          inject: (definition.requires ?? []).map((dependency) => this.serviceName(candidate, dependency)),
           apply: (ctx: Context) => {
             const pluginContext: PluginContext = {
               compositionId: candidate.definition.id,
               effect: (label: string): void => this.trackEffect(ctx, label),
-              getService: <T>(name: string): T | undefined => ctx.get(name, false) as T | undefined,
+              getService: <T>(name: string): T | undefined =>
+                ctx.get(this.serviceName(candidate, name), false) as T | undefined,
               requireService: <T>(name: string): T => {
-                const value = ctx.get(name, false) as T | undefined
+                const value = ctx.get(this.serviceName(candidate, name), false) as T | undefined
                 if (value === undefined) throw new Error(`required service "${name}" is unavailable`)
                 return value
               },
@@ -228,6 +247,7 @@ class CordisCompositionRuntime implements CompositionRuntime {
         })
         candidate.plugins.push(fiber)
       }
+      candidate.pluginsStarted = true
     }
 
     await Promise.all(candidate.plugins.map((fiber) => fiber.await().catch(() => undefined)))
@@ -237,7 +257,9 @@ class CordisCompositionRuntime implements CompositionRuntime {
         hasPending = true
         const definition = candidate.definition.plugins[index]
         for (const dependency of definition?.requires ?? []) {
-          if (fiber.ctx.get(dependency, false) === undefined) candidate.missing.add(dependency)
+          if (fiber.ctx.get(this.serviceName(candidate, dependency), false) === undefined) {
+            candidate.missing.add(dependency)
+          }
         }
         continue
       }
@@ -247,34 +269,114 @@ class CordisCompositionRuntime implements CompositionRuntime {
     }
 
     const unresolved = [...candidate.missing]
-    if (unresolved.length > 0) {
-      const permanent = unresolved.filter((dependency) => !deferred.has(dependency))
-      if (permanent.length > 0) return { status: 'failed', reason: 'missing_dependency' }
-      return { status: 'pending', missing: unresolved }
+    const permanent = unresolved.filter((dependency) => !deferred.has(dependency))
+    if (permanent.length > 0) {
+      return { status: 'failed', reason: 'missing_dependency', missing: permanent }
     }
     if (hasPending) return { status: 'pending', missing: unresolved }
     return { status: 'active' }
   }
 
-  private trackEffect(ctx: Context, label: string, onDispose?: () => void): void {
-    const token = Symbol(label)
-    this.trackedEffects.add(token)
-    ctx.effect(() => async () => {
-      onDispose?.()
-      this.trackedEffects.delete(token)
-    }, label)
-  }
-
-  private async disposeCandidate(candidate: Candidate | undefined): Promise<void> {
-    if (!candidate) return
-    await Promise.all([...candidate.scopes].map((scope) => scope.dispose()))
-    await candidate.group.dispose()
-  }
-
   private async publishCandidate(candidate: Candidate): Promise<void> {
+    for (const record of this.scopes.values()) {
+      if (!record.disposed) await this.attachScope(record, candidate)
+    }
     this.pending = undefined
     const previous = this.current
     this.current = candidate
     await this.disposeCandidate(previous)
+  }
+
+  private async attachScope(record: ScopeRecord, candidate: Candidate): Promise<void> {
+    const context = candidate.group.ctx.isolate('agent-state', Symbol(record.id))
+    const fiber = context.plugin({
+      name: `agent:${record.id}`,
+      apply: (ctx: Context) => {
+        ctx.provide('agent-state', record.values)
+      },
+    })
+    await fiber.await()
+    record.fiber = fiber
+    record.candidate = candidate
+    candidate.scopes.add(fiber)
+  }
+
+  private scopeHandle(record: ScopeRecord): AgentScope {
+    return {
+      id: record.id,
+      set: <T>(key: string, value: T): void => {
+        this.assertScopeUsable(record)
+        record.values.set(key, value)
+      },
+      get: <T>(key: string): T | undefined => {
+        if (record.disposed) throw new Error(`Agent scope "${record.id}" is disposed`)
+        return record.values.get(key) as T | undefined
+      },
+      effect: (label: string): void => {
+        this.assertScopeUsable(record)
+        const fiber = record.fiber
+        if (!fiber) throw new Error(`Agent scope "${record.id}" is not attached`)
+        const token = Symbol(label)
+        record.effects.add(token)
+        try {
+          this.trackEffect(fiber.ctx, label, () => record.effects.delete(token))
+        } catch (error) {
+          record.effects.delete(token)
+          throw error
+        }
+      },
+      effectCount: (): number => record.effects.size,
+      dispose: async (): Promise<void> => {
+        if (record.disposed) return
+        record.disposed = true
+        record.values.clear()
+        record.effects.clear()
+        const fiber = record.fiber
+        record.fiber = undefined
+        if (fiber && record.candidate) record.candidate.scopes.delete(fiber)
+        record.candidate = undefined
+        this.scopes.delete(record.id)
+        await fiber?.dispose()
+      },
+    }
+  }
+
+  private assertScopeUsable(record: ScopeRecord): void {
+    if (record.disposed) throw new Error(`Agent scope "${record.id}" is disposed`)
+    if (!record.fiber || record.fiber.state !== ACTIVE) {
+      throw new Error(`Agent scope "${record.id}" is not attached`)
+    }
+  }
+
+  private serviceName(candidate: Candidate, name: string): string {
+    return `${candidate.servicePrefix}${name}`
+  }
+
+  private trackEffect(ctx: Context, label: string, onDispose?: () => void): void {
+    const token = Symbol(label)
+    this.trackedEffects.add(token)
+    try {
+      ctx.effect(() => async () => {
+        onDispose?.()
+        this.trackedEffects.delete(token)
+      }, label)
+    } catch (error) {
+      onDispose?.()
+      this.trackedEffects.delete(token)
+      throw error
+    }
+  }
+
+  private async disposeCandidate(candidate: Candidate | undefined): Promise<void> {
+    if (!candidate) return
+    for (const fiber of candidate.scopes) {
+      for (const record of this.scopes.values()) {
+        if (record.fiber === fiber) {
+          record.fiber = undefined
+          record.candidate = undefined
+        }
+      }
+    }
+    await candidate.group.dispose()
   }
 }
