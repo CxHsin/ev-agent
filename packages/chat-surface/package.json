@@ -1,0 +1,29 @@
+{
+  "name": "@ev-agent/chat-surface",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "dev:api": "tsx src/dev-server.ts"
+  },
+  "dependencies": {
+    "@ev-agent/api": "workspace:*",
+    "@ev-agent/execution": "workspace:*",
+    "@ev-agent/model": "workspace:*",
+    "@ev-agent/session": "workspace:*",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.4.1",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "tsx": "^4.19.0",
+    "vite": "^6.3.5"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

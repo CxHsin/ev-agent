@@ -1,10 +1,36 @@
 export { DurabilityStore } from './store.js'
 export type {
+  DurableClaim,
+  DurableEvidenceBundle,
+  DurableEvidenceItem,
+  DurableMemoryCandidate,
+  MemoryAcceptanceProof,
+  MemoryCandidateStatus,
+  MemoryKind,
+  StoreEvidenceBundleInput,
+  StoreEvidenceItemInput,
+  StoreMemoryCandidateInput,
+} from './memory.js'
+export type {
+  DurableSession,
+  DurableSessionMessage,
+  SessionMessageRole,
+  StoreSessionInput,
+  StoreSessionMessageInput,
+} from './session.js'
+export type {
   AgentEvent,
   AppendEventInput,
+  ApprovalDecisionResult,
+  ApprovalStatus,
+  DurableApproval,
+  EffectClaim,
+  EffectClaimStatus,
   EffectReceipt,
   JobStatus,
   PersistentJob,
   RecordEffectInput,
+  RecordEffectEventInput,
+  StoreApprovalInput,
   StoreJobInput,
 } from './store.js'

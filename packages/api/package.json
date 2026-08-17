@@ -1,14 +1,16 @@
 {
-  "name": "@ev-agent/execution",
+  "name": "@ev-agent/api",
   "private": true,
   "type": "module",
   "version": "0.1.0",
   "dependencies": {
     "@ev-agent/composition": "workspace:*",
-    "@ev-agent/personal-context": "workspace:*",
     "@ev-agent/durability": "workspace:*",
+    "@ev-agent/execution": "workspace:*",
     "@ev-agent/model": "workspace:*",
-    "@ev-agent/plugin-sdk": "workspace:*"
+    "@ev-agent/personal-context": "workspace:*",
+    "@ev-agent/session": "workspace:*",
+    "fastify": "^5.3.0"
   },
   "exports": {
     ".": "./src/index.ts"

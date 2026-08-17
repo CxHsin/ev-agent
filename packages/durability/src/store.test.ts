@@ -68,6 +68,43 @@ describe('SQLite Durability', () => {
     expect(retry.result).toEqual({ sent: true })
   })
 
+  it('keeps a started effect intent from being claimed by a retry', () => {
+    const store = open(databasePath())
+    const first = store.claimEffect({ idempotencyKey: 'effect-intent-1', runId: 'run-1', effectType: 'send' })
+    const retry = store.claimEffect({ idempotencyKey: 'effect-intent-1', runId: 'run-1', effectType: 'send' })
+
+    expect(first).toMatchObject({ status: 'started', created: true })
+    expect(retry).toMatchObject({ status: 'started', created: false })
+  })
+
+  it('persists pending approvals and changes each decision only once', () => {
+    const path = databasePath()
+    const first = open(path)
+    expect(first.createApproval({
+      approvalId: 'approval-1',
+      runId: 'run-1',
+      toolCallId: 'call-1',
+      toolName: 'send_message',
+      effectClass: 'external',
+      idempotencyKey: 'run-1:send_message:call-1',
+      input: { recipient: 'user-1' },
+      requiredPermission: 'message.send',
+      createdAt: 100,
+    })).toEqual(expect.objectContaining({ status: 'pending' }))
+    first.close()
+
+    const second = open(path)
+    expect(second.listPendingApprovals('run-1')).toHaveLength(1)
+    expect(second.decideApproval('approval-1', 'approved', 'confirmed', 101)).toEqual({
+      changed: true,
+      approval: expect.objectContaining({ status: 'approved', decisionReason: 'confirmed', decidedAt: 101 }),
+    })
+    expect(second.decideApproval('approval-1', 'denied', 'late denial', 102)).toEqual({
+      changed: false,
+      approval: expect.objectContaining({ status: 'approved', decisionReason: 'confirmed', decidedAt: 101 }),
+    })
+  })
+
   it('claims, completes, and recovers persistent jobs after a lease expires', () => {
     const path = databasePath()
     const first = open(path)

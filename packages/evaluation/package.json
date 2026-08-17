@@ -1,14 +1,14 @@
 {
-  "name": "@ev-agent/execution",
+  "name": "@ev-agent/evaluation",
   "private": true,
   "type": "module",
   "version": "0.1.0",
   "dependencies": {
     "@ev-agent/composition": "workspace:*",
-    "@ev-agent/personal-context": "workspace:*",
     "@ev-agent/durability": "workspace:*",
+    "@ev-agent/execution": "workspace:*",
     "@ev-agent/model": "workspace:*",
-    "@ev-agent/plugin-sdk": "workspace:*"
+    "@langchain/langgraph": "^1.4.10"
   },
   "exports": {
     ".": "./src/index.ts"
