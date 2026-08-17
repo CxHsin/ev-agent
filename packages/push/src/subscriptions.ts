@@ -147,6 +147,7 @@ export function parseSubscriptionRequest(requestText: string, timezone: string, 
     channel,
     itemBudget,
     filters,
+    catchUp: /\ball\b/i.test(text) ? 'all' : /\bskip\b/i.test(text) ? 'skip' : 'latest',
     validFrom: now,
   }
 }

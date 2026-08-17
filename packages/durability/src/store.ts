@@ -17,8 +17,14 @@ import type {
 import type {
   DurablePushSubscription,
   DurablePushSubscriptionCandidate,
+  DurablePushOccurrence,
+  DurablePushSchedule,
   PushCandidateStatus,
+  PushOccurrenceStatus,
+  PushScheduleStatus,
   PushSubscriptionStatus,
+  StorePushOccurrenceInput,
+  StorePushScheduleInput,
   StorePushSubscriptionCandidateInput,
 } from './push.js'
 
@@ -248,6 +254,29 @@ interface PushSubscriptionRow {
   updated_at: number
 }
 
+interface PushScheduleRow {
+  schedule_id: string
+  subscription_id: string
+  schedule: string
+  timezone: string
+  catch_up: import('./push.js').PushCatchUpPolicy
+  status: PushScheduleStatus
+  last_reconciled_at: number
+}
+
+interface PushOccurrenceRow {
+  occurrence_id: string
+  schedule_id: string
+  subscription_id: string
+  intended_local_date: string
+  intended_at: number
+  status: PushOccurrenceStatus
+  claim_owner: string | null
+  lease_until: number | null
+  completed_at: number | null
+  reason: string | null
+}
+
 export class DurabilityStore {
   private readonly db: DatabaseSync
 
@@ -349,6 +378,32 @@ export class DurabilityStore {
       );
       CREATE INDEX IF NOT EXISTS push_subscriptions_scope_status
         ON push_subscriptions (user_scope_id, status, updated_at);
+      CREATE TABLE IF NOT EXISTS push_schedules (
+        schedule_id TEXT PRIMARY KEY,
+        subscription_id TEXT NOT NULL UNIQUE REFERENCES push_subscriptions (subscription_id) ON DELETE CASCADE,
+        schedule TEXT NOT NULL,
+        timezone TEXT NOT NULL,
+        catch_up TEXT NOT NULL CHECK (catch_up IN ('latest', 'all', 'skip')),
+        status TEXT NOT NULL CHECK (status IN ('active', 'paused')),
+        last_reconciled_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS push_schedules_subscription_status
+        ON push_schedules (subscription_id, status);
+      CREATE TABLE IF NOT EXISTS push_occurrences (
+        occurrence_id TEXT PRIMARY KEY,
+        schedule_id TEXT NOT NULL REFERENCES push_schedules (schedule_id) ON DELETE CASCADE,
+        subscription_id TEXT NOT NULL REFERENCES push_subscriptions (subscription_id) ON DELETE CASCADE,
+        intended_local_date TEXT NOT NULL,
+        intended_at INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'completed', 'skipped')),
+        claim_owner TEXT,
+        lease_until INTEGER,
+        completed_at INTEGER,
+        reason TEXT,
+        UNIQUE (schedule_id, intended_local_date)
+      );
+      CREATE INDEX IF NOT EXISTS push_occurrences_claimable
+        ON push_occurrences (schedule_id, status, intended_at, occurrence_id);
 
       CREATE TABLE IF NOT EXISTS memory_candidates (
         candidate_id TEXT PRIMARY KEY,
@@ -834,6 +889,18 @@ export class DurabilityStore {
         input.confirmedAt,
         input.confirmedAt,
       )
+      this.db.prepare(`
+        INSERT INTO push_schedules (
+          schedule_id, subscription_id, schedule, timezone, catch_up, status, last_reconciled_at
+        ) VALUES (?, ?, ?, ?, ?, 'active', ?)
+      `).run(
+        input.subscriptionId,
+        input.subscriptionId,
+        candidate.draft.schedule,
+        candidate.draft.timezone,
+        candidate.draft.catchUp,
+        candidate.draft.validFrom - 1,
+      )
       const subscription = this.getPushSubscription(input.subscriptionId)
       if (!subscription) throw new Error(`Push Subscription "${input.subscriptionId}" was not stored`)
       this.commit()
@@ -898,10 +965,187 @@ export class DurabilityStore {
   }
 
   setPushSubscriptionStatus(subscriptionId: string, status: PushSubscriptionStatus, updatedAt: number): DurablePushSubscription {
-    this.db.prepare('UPDATE push_subscriptions SET status = ?, updated_at = ? WHERE subscription_id = ?').run(status, updatedAt, subscriptionId)
-    const subscription = this.getPushSubscription(subscriptionId)
-    if (!subscription) throw new Error(`Push Subscription "${subscriptionId}" was not found`)
-    return subscription
+    this.begin()
+    try {
+      const changes = this.db.prepare('UPDATE push_subscriptions SET status = ?, updated_at = ? WHERE subscription_id = ?').run(status, updatedAt, subscriptionId).changes
+      if (changes !== 1) throw new Error(`Push Subscription "${subscriptionId}" was not found`)
+      this.db.prepare('UPDATE push_schedules SET status = ? WHERE subscription_id = ?').run(status === 'active' ? 'active' : 'paused', subscriptionId)
+      const subscription = this.getPushSubscription(subscriptionId)
+      if (!subscription) throw new Error(`Push Subscription "${subscriptionId}" was not found`)
+      this.commit()
+      return subscription
+    } catch (error) {
+      this.rollback()
+      throw error
+    }
+  }
+
+  getPushSchedule(scheduleId: string): DurablePushSchedule | undefined {
+    const row = this.db.prepare(`
+      SELECT schedule_id, subscription_id, schedule, timezone, catch_up, status, last_reconciled_at
+      FROM push_schedules
+      WHERE schedule_id = ?
+    `).get(scheduleId) as unknown as PushScheduleRow | undefined
+    return row ? toPushSchedule(row) : undefined
+  }
+
+  getPushScheduleBySubscription(subscriptionId: string): DurablePushSchedule | undefined {
+    const row = this.db.prepare(`
+      SELECT schedule_id, subscription_id, schedule, timezone, catch_up, status, last_reconciled_at
+      FROM push_schedules
+      WHERE subscription_id = ?
+    `).get(subscriptionId) as unknown as PushScheduleRow | undefined
+    return row ? toPushSchedule(row) : undefined
+  }
+
+  createPushSchedule(input: StorePushScheduleInput): DurablePushSchedule {
+    this.db.prepare(`
+      INSERT INTO push_schedules (
+        schedule_id, subscription_id, schedule, timezone, catch_up, status, last_reconciled_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (schedule_id) DO NOTHING
+    `).run(
+      input.scheduleId,
+      input.subscriptionId,
+      input.schedule,
+      input.timezone,
+      input.catchUp,
+      input.status ?? 'active',
+      input.lastReconciledAt,
+    )
+    const schedule = this.getPushSchedule(input.scheduleId)
+    if (!schedule) throw new Error(`Push Schedule "${input.scheduleId}" was not stored`)
+    if (schedule.subscriptionId !== input.subscriptionId || schedule.schedule !== input.schedule || schedule.timezone !== input.timezone || schedule.catchUp !== input.catchUp) {
+      throw new Error(`Push Schedule "${input.scheduleId}" conflicts with an existing schedule`)
+    }
+    return schedule
+  }
+
+  setPushScheduleStatus(scheduleId: string, status: PushScheduleStatus): DurablePushSchedule {
+    const changes = this.db.prepare('UPDATE push_schedules SET status = ? WHERE schedule_id = ?').run(status, scheduleId).changes
+    if (changes !== 1) throw new Error(`Push Schedule "${scheduleId}" was not found`)
+    const schedule = this.getPushSchedule(scheduleId)
+    if (!schedule) throw new Error(`Push Schedule "${scheduleId}" was not stored`)
+    return schedule
+  }
+
+  setPushScheduleLastReconciledAt(scheduleId: string, lastReconciledAt: number): DurablePushSchedule {
+    const changes = this.db.prepare('UPDATE push_schedules SET last_reconciled_at = ? WHERE schedule_id = ?').run(lastReconciledAt, scheduleId).changes
+    if (changes !== 1) throw new Error(`Push Schedule "${scheduleId}" was not found`)
+    const schedule = this.getPushSchedule(scheduleId)
+    if (!schedule) throw new Error(`Push Schedule "${scheduleId}" was not stored`)
+    return schedule
+  }
+
+  createPushOccurrence(input: StorePushOccurrenceInput): DurablePushOccurrence {
+    this.db.prepare(`
+      INSERT INTO push_occurrences (
+        occurrence_id, schedule_id, subscription_id, intended_local_date, intended_at,
+        status, reason
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (occurrence_id) DO NOTHING
+    `).run(
+      input.occurrenceId,
+      input.scheduleId,
+      input.subscriptionId,
+      input.intendedLocalDate,
+      input.intendedAt,
+      input.status ?? 'pending',
+      input.reason ?? null,
+    )
+    const occurrence = this.getPushOccurrence(input.occurrenceId)
+    if (!occurrence) throw new Error(`Push occurrence "${input.occurrenceId}" was not stored`)
+    if (occurrence.scheduleId !== input.scheduleId || occurrence.subscriptionId !== input.subscriptionId || occurrence.intendedLocalDate !== input.intendedLocalDate || occurrence.intendedAt !== input.intendedAt) {
+      throw new Error(`Push occurrence "${input.occurrenceId}" conflicts with an existing occurrence`)
+    }
+    return occurrence
+  }
+
+  getPushOccurrence(occurrenceId: string): DurablePushOccurrence | undefined {
+    const row = this.db.prepare(`
+      SELECT occurrence_id, schedule_id, subscription_id, intended_local_date, intended_at,
+        status, claim_owner, lease_until, completed_at, reason
+      FROM push_occurrences
+      WHERE occurrence_id = ?
+    `).get(occurrenceId) as unknown as PushOccurrenceRow | undefined
+    return row ? toPushOccurrence(row) : undefined
+  }
+
+  listPushOccurrences(scheduleId: string): readonly DurablePushOccurrence[] {
+    const rows = this.db.prepare(`
+      SELECT occurrence_id, schedule_id, subscription_id, intended_local_date, intended_at,
+        status, claim_owner, lease_until, completed_at, reason
+      FROM push_occurrences
+      WHERE schedule_id = ?
+      ORDER BY intended_at ASC, occurrence_id ASC
+    `).all(scheduleId) as unknown as PushOccurrenceRow[]
+    return rows.map(toPushOccurrence)
+  }
+
+  claimPushOccurrence(occurrenceId: string, claimOwner: string, now: number, leaseMs: number): DurablePushOccurrence | undefined {
+    if (leaseMs <= 0) throw new RangeError('leaseMs must be greater than zero')
+    this.begin()
+    try {
+      const changes = this.db.prepare(`
+        UPDATE push_occurrences
+        SET status = 'running', claim_owner = ?, lease_until = ?, reason = NULL
+        WHERE occurrence_id = ?
+          AND (status = 'pending' OR (status = 'running' AND lease_until IS NOT NULL AND lease_until <= ?))
+      `).run(claimOwner, now + leaseMs, occurrenceId, now).changes
+      const occurrence = this.getPushOccurrence(occurrenceId)
+      this.commit()
+      return changes === 1 ? occurrence : undefined
+    } catch (error) {
+      this.rollback()
+      throw error
+    }
+  }
+
+  completePushOccurrence(occurrenceId: string, claimOwner: string, completedAt: number): DurablePushOccurrence {
+    this.begin()
+    try {
+      const current = this.getPushOccurrence(occurrenceId)
+      if (!current) throw new Error(`Push occurrence "${occurrenceId}" was not found`)
+      if (current.status === 'completed') {
+        this.commit()
+        return current
+      }
+      if (current.status !== 'running' || current.claimOwner !== claimOwner) throw new Error(`Push occurrence "${occurrenceId}" is not owned by worker "${claimOwner}"`)
+      this.db.prepare(`
+        UPDATE push_occurrences
+        SET status = 'completed', claim_owner = NULL, lease_until = NULL, completed_at = ?, reason = NULL
+        WHERE occurrence_id = ? AND status = 'running' AND claim_owner = ?
+      `).run(completedAt, occurrenceId, claimOwner)
+      const completed = this.getPushOccurrence(occurrenceId)
+      if (!completed) throw new Error(`Push occurrence "${occurrenceId}" was not stored`)
+      this.commit()
+      return completed
+    } catch (error) {
+      this.rollback()
+      throw error
+    }
+  }
+
+  skipPushOccurrence(occurrenceId: string, reason: string): DurablePushOccurrence {
+    this.begin()
+    try {
+      const current = this.getPushOccurrence(occurrenceId)
+      if (!current) throw new Error(`Push occurrence "${occurrenceId}" was not found`)
+      if (current.status === 'pending') {
+        this.db.prepare(`
+          UPDATE push_occurrences
+          SET status = 'skipped', claim_owner = NULL, lease_until = NULL, reason = ?
+          WHERE occurrence_id = ? AND status = 'pending'
+        `).run(reason, occurrenceId)
+      }
+      const skipped = this.getPushOccurrence(occurrenceId)
+      if (!skipped) throw new Error(`Push occurrence "${occurrenceId}" was not stored`)
+      this.commit()
+      return skipped
+    } catch (error) {
+      this.rollback()
+      throw error
+    }
   }
 
   private getSessionMessage(messageId: string): DurableSessionMessage | undefined {
@@ -1545,6 +1789,33 @@ function toPushSubscription(row: PushSubscriptionRow): DurablePushSubscription {
     status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  }
+}
+
+function toPushSchedule(row: PushScheduleRow): DurablePushSchedule {
+  return {
+    scheduleId: row.schedule_id,
+    subscriptionId: row.subscription_id,
+    schedule: row.schedule,
+    timezone: row.timezone,
+    catchUp: row.catch_up,
+    status: row.status,
+    lastReconciledAt: row.last_reconciled_at,
+  }
+}
+
+function toPushOccurrence(row: PushOccurrenceRow): DurablePushOccurrence {
+  return {
+    occurrenceId: row.occurrence_id,
+    scheduleId: row.schedule_id,
+    subscriptionId: row.subscription_id,
+    intendedLocalDate: row.intended_local_date,
+    intendedAt: row.intended_at,
+    status: row.status,
+    claimOwner: row.claim_owner ?? undefined,
+    leaseUntil: row.lease_until ?? undefined,
+    completedAt: row.completed_at ?? undefined,
+    reason: row.reason ?? undefined,
   }
 }
 

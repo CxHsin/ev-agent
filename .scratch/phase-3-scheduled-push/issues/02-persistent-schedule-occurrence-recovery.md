@@ -4,10 +4,10 @@
 
 **Blocked by:** 01 — Push Subscription Candidate 与显式确认
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Schedule 只从 active subscription 生成 occurrence，subscription pause/revoke/expiry 后不再生成新的 authority
-- [ ] occurrence key、claim、completion 和 catch-up policy 都 durable，并在 fresh SQLite instance 中恢复
-- [ ] 同一 occurrence 的重复 claim/retry 不会启动第二次 delivery pipeline
-- [ ] fake clock 覆盖 daily 20:00、restart、missed occurrence、DST 边界和过期 subscription
-- [ ] scheduler 不把 timer ownership 交给 plugin，且使用有限 schedule/fetch/item/retry budget
+- [x] Schedule 只从 active subscription 生成 occurrence，subscription pause/revoke/expiry 后不再生成新的 authority
+- [x] occurrence key、claim、completion 和 catch-up policy 都 durable，并在 fresh SQLite instance 中恢复
+- [x] 同一 occurrence 的重复 claim/retry 不会启动第二次 delivery pipeline
+- [x] fake clock 覆盖 daily 20:00、restart、missed occurrence、DST 边界和过期 subscription
+- [x] scheduler 不把 timer ownership 交给 plugin，且使用有限 schedule/fetch/item/retry budget

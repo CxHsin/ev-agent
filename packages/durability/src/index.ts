@@ -2,11 +2,18 @@ export { DurabilityStore } from './store.js'
 export type {
   DurablePushSubscription,
   DurablePushSubscriptionCandidate,
+  DurablePushOccurrence,
+  DurablePushSchedule,
   PushCandidateStatus,
+  PushCatchUpPolicy,
   PushDeliveryChannel,
   PushSubscriptionDraft,
   PushSubscriptionStatus,
+  PushOccurrenceStatus,
+  PushScheduleStatus,
   StorePushSubscriptionCandidateInput,
+  StorePushScheduleInput,
+  StorePushOccurrenceInput,
 } from './push.js'
 export type {
   DurableClaim,

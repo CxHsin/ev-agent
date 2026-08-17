@@ -51,6 +51,6 @@ describe('PushSubscriptionSurface', () => {
 
 const candidate = {
   candidateId: 'candidate-1', userScopeId: 'user-1', requestText: 'Watch the AI feed.',
-  draft: { scope: 'AI engineering', sources: ['https://feeds.example.test/ai'], schedule: 'daily@20:00', timezone: 'UTC', channel: 'inbox' as const, itemBudget: 5, filters: [], validFrom: 1 },
+  draft: { scope: 'AI engineering', sources: ['https://feeds.example.test/ai'], schedule: 'daily@20:00', timezone: 'UTC', channel: 'inbox' as const, itemBudget: 5, filters: [], catchUp: 'latest' as const, validFrom: 1 },
   revision: 1, scopeFingerprint: 'fp-1', status: 'pending' as const, createdAt: 1, decisionReason: undefined, decidedAt: undefined,
 }
