@@ -14,6 +14,13 @@ import type {
   StoreSessionInput,
   StoreSessionMessageInput,
 } from './session.js'
+import type {
+  DurablePushSubscription,
+  DurablePushSubscriptionCandidate,
+  PushCandidateStatus,
+  PushSubscriptionStatus,
+  StorePushSubscriptionCandidateInput,
+} from './push.js'
 
 export type PayloadStatus = 'present' | 'missing' | 'erased'
 
@@ -216,6 +223,31 @@ interface JobRow {
   error: string | null
 }
 
+interface PushCandidateRow {
+  candidate_id: string
+  user_scope_id: string
+  request_text: string
+  draft_json: string
+  revision: number
+  scope_fingerprint: string
+  status: PushCandidateStatus
+  decision_reason: string | null
+  created_at: number
+  decided_at: number | null
+}
+
+interface PushSubscriptionRow {
+  subscription_id: string
+  candidate_id: string
+  user_scope_id: string
+  draft_json: string
+  revision: number
+  scope_fingerprint: string
+  status: PushSubscriptionStatus
+  created_at: number
+  updated_at: number
+}
+
 export class DurabilityStore {
   private readonly db: DatabaseSync
 
@@ -289,6 +321,34 @@ export class DurabilityStore {
       );
       CREATE INDEX IF NOT EXISTS session_messages_session_sequence
         ON session_messages (session_id, sequence);
+
+      CREATE TABLE IF NOT EXISTS push_subscription_candidates (
+        candidate_id TEXT PRIMARY KEY,
+        user_scope_id TEXT NOT NULL,
+        request_text TEXT NOT NULL,
+        draft_json TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        scope_fingerprint TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'confirmed', 'rejected')),
+        decision_reason TEXT,
+        created_at INTEGER NOT NULL,
+        decided_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS push_candidates_scope_status
+        ON push_subscription_candidates (user_scope_id, status, created_at);
+      CREATE TABLE IF NOT EXISTS push_subscriptions (
+        subscription_id TEXT PRIMARY KEY,
+        candidate_id TEXT NOT NULL UNIQUE REFERENCES push_subscription_candidates (candidate_id),
+        user_scope_id TEXT NOT NULL,
+        draft_json TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        scope_fingerprint TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('active', 'paused', 'revoked', 'expired')),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS push_subscriptions_scope_status
+        ON push_subscriptions (user_scope_id, status, updated_at);
 
       CREATE TABLE IF NOT EXISTS memory_candidates (
         candidate_id TEXT PRIMARY KEY,
@@ -682,6 +742,166 @@ export class DurabilityStore {
       created_at: number
     }>
     return rows.map(toSessionMessage)
+  }
+
+  createPushSubscriptionCandidate(input: StorePushSubscriptionCandidateInput): DurablePushSubscriptionCandidate {
+    this.db.prepare(`
+      INSERT INTO push_subscription_candidates (
+        candidate_id, user_scope_id, request_text, draft_json, revision, scope_fingerprint,
+        status, decision_reason, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (candidate_id) DO NOTHING
+    `).run(
+      input.candidateId,
+      input.userScopeId,
+      input.requestText,
+      stringify(input.draft),
+      input.revision,
+      input.scopeFingerprint,
+      input.status ?? 'pending',
+      input.decisionReason ?? null,
+      input.createdAt,
+    )
+    const candidate = this.getPushSubscriptionCandidate(input.candidateId)
+    if (!candidate) throw new Error(`Push Subscription Candidate "${input.candidateId}" was not stored`)
+    if (candidate.userScopeId !== input.userScopeId || candidate.requestText !== input.requestText
+      || candidate.scopeFingerprint !== input.scopeFingerprint || candidate.revision !== input.revision) {
+      throw new Error(`Push Subscription Candidate "${input.candidateId}" conflicts with an existing candidate`)
+    }
+    return candidate
+  }
+
+  getPushSubscriptionCandidate(candidateId: string): DurablePushSubscriptionCandidate | undefined {
+    const row = this.db.prepare(`
+      SELECT candidate_id, user_scope_id, request_text, draft_json, revision, scope_fingerprint,
+        status, decision_reason, created_at, decided_at
+      FROM push_subscription_candidates
+      WHERE candidate_id = ?
+    `).get(candidateId) as unknown as PushCandidateRow | undefined
+    return row ? toPushCandidate(row) : undefined
+  }
+
+  listPushSubscriptionCandidates(userScopeId: string): readonly DurablePushSubscriptionCandidate[] {
+    const rows = this.db.prepare(`
+      SELECT candidate_id, user_scope_id, request_text, draft_json, revision, scope_fingerprint,
+        status, decision_reason, created_at, decided_at
+      FROM push_subscription_candidates
+      WHERE user_scope_id = ?
+      ORDER BY created_at ASC, candidate_id ASC
+    `).all(userScopeId) as unknown as PushCandidateRow[]
+    return rows.map(toPushCandidate)
+  }
+
+  confirmPushSubscription(input: {
+    readonly candidateId: string
+    readonly subscriptionId: string
+    readonly revision: number
+    readonly scopeFingerprint: string
+    readonly confirmedAt: number
+  }): DurablePushSubscription {
+    this.begin()
+    try {
+      const candidate = this.getPushSubscriptionCandidate(input.candidateId)
+      if (!candidate) throw new Error(`Push Subscription Candidate "${input.candidateId}" was not found`)
+      if (candidate.status === 'confirmed') {
+        const existing = this.getPushSubscriptionByCandidate(input.candidateId)
+        if (existing) {
+          this.commit()
+          return existing
+        }
+      }
+      if (candidate.status !== 'pending') throw new Error(`Push Subscription Candidate "${input.candidateId}" is not pending`)
+      if (candidate.revision !== input.revision || candidate.scopeFingerprint !== input.scopeFingerprint) {
+        throw new Error(`Push Subscription Candidate "${input.candidateId}" has changed since it was reviewed`)
+      }
+      this.db.prepare(`
+        UPDATE push_subscription_candidates
+        SET status = 'confirmed', decision_reason = 'explicit_confirmation', decided_at = ?
+        WHERE candidate_id = ? AND status = 'pending' AND revision = ? AND scope_fingerprint = ?
+      `).run(input.confirmedAt, input.candidateId, input.revision, input.scopeFingerprint)
+      this.db.prepare(`
+        INSERT INTO push_subscriptions (
+          subscription_id, candidate_id, user_scope_id, draft_json, revision, scope_fingerprint,
+          status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)
+      `).run(
+        input.subscriptionId,
+        candidate.candidateId,
+        candidate.userScopeId,
+        stringify(candidate.draft),
+        candidate.revision,
+        candidate.scopeFingerprint,
+        input.confirmedAt,
+        input.confirmedAt,
+      )
+      const subscription = this.getPushSubscription(input.subscriptionId)
+      if (!subscription) throw new Error(`Push Subscription "${input.subscriptionId}" was not stored`)
+      this.commit()
+      return subscription
+    } catch (error) {
+      this.rollback()
+      throw error
+    }
+  }
+
+  rejectPushSubscriptionCandidate(candidateId: string, reason: string, decidedAt: number): DurablePushSubscriptionCandidate {
+    this.begin()
+    try {
+      const candidate = this.getPushSubscriptionCandidate(candidateId)
+      if (!candidate) throw new Error(`Push Subscription Candidate "${candidateId}" was not found`)
+      if (candidate.status === 'pending') {
+        this.db.prepare(`
+          UPDATE push_subscription_candidates
+          SET status = 'rejected', decision_reason = ?, decided_at = ?
+          WHERE candidate_id = ? AND status = 'pending'
+        `).run(reason, decidedAt, candidateId)
+      }
+      const updated = this.getPushSubscriptionCandidate(candidateId)
+      if (!updated) throw new Error(`Push Subscription Candidate "${candidateId}" was not stored`)
+      this.commit()
+      return updated
+    } catch (error) {
+      this.rollback()
+      throw error
+    }
+  }
+
+  getPushSubscription(subscriptionId: string): DurablePushSubscription | undefined {
+    const row = this.db.prepare(`
+      SELECT subscription_id, candidate_id, user_scope_id, draft_json, revision, scope_fingerprint,
+        status, created_at, updated_at
+      FROM push_subscriptions
+      WHERE subscription_id = ?
+    `).get(subscriptionId) as unknown as PushSubscriptionRow | undefined
+    return row ? toPushSubscription(row) : undefined
+  }
+
+  getPushSubscriptionByCandidate(candidateId: string): DurablePushSubscription | undefined {
+    const row = this.db.prepare(`
+      SELECT subscription_id, candidate_id, user_scope_id, draft_json, revision, scope_fingerprint,
+        status, created_at, updated_at
+      FROM push_subscriptions
+      WHERE candidate_id = ?
+    `).get(candidateId) as unknown as PushSubscriptionRow | undefined
+    return row ? toPushSubscription(row) : undefined
+  }
+
+  listPushSubscriptions(userScopeId: string): readonly DurablePushSubscription[] {
+    const rows = this.db.prepare(`
+      SELECT subscription_id, candidate_id, user_scope_id, draft_json, revision, scope_fingerprint,
+        status, created_at, updated_at
+      FROM push_subscriptions
+      WHERE user_scope_id = ?
+      ORDER BY created_at ASC, subscription_id ASC
+    `).all(userScopeId) as unknown as PushSubscriptionRow[]
+    return rows.map(toPushSubscription)
+  }
+
+  setPushSubscriptionStatus(subscriptionId: string, status: PushSubscriptionStatus, updatedAt: number): DurablePushSubscription {
+    this.db.prepare('UPDATE push_subscriptions SET status = ?, updated_at = ? WHERE subscription_id = ?').run(status, updatedAt, subscriptionId)
+    const subscription = this.getPushSubscription(subscriptionId)
+    if (!subscription) throw new Error(`Push Subscription "${subscriptionId}" was not found`)
+    return subscription
   }
 
   private getSessionMessage(messageId: string): DurableSessionMessage | undefined {
@@ -1296,6 +1516,35 @@ function toEvent(row: EventRow): AgentEvent {
     occurredAt: row.occurred_at,
     payloadStatus: row.payload_status,
     payload: parseJson(row.payload_json),
+  }
+}
+
+function toPushCandidate(row: PushCandidateRow): DurablePushSubscriptionCandidate {
+  return {
+    candidateId: row.candidate_id,
+    userScopeId: row.user_scope_id,
+    requestText: row.request_text,
+    draft: JSON.parse(row.draft_json) as DurablePushSubscriptionCandidate['draft'],
+    revision: row.revision,
+    scopeFingerprint: row.scope_fingerprint,
+    status: row.status,
+    decisionReason: row.decision_reason ?? undefined,
+    createdAt: row.created_at,
+    decidedAt: row.decided_at ?? undefined,
+  }
+}
+
+function toPushSubscription(row: PushSubscriptionRow): DurablePushSubscription {
+  return {
+    subscriptionId: row.subscription_id,
+    candidateId: row.candidate_id,
+    userScopeId: row.user_scope_id,
+    draft: JSON.parse(row.draft_json) as DurablePushSubscription['draft'],
+    revision: row.revision,
+    scopeFingerprint: row.scope_fingerprint,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   }
 }
 

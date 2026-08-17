@@ -38,6 +38,9 @@ importers:
       '@ev-agent/personal-context':
         specifier: workspace:*
         version: link:../personal-context
+      '@ev-agent/push':
+        specifier: workspace:*
+        version: link:../push
       '@ev-agent/session':
         specifier: workspace:*
         version: link:../session
@@ -50,6 +53,9 @@ importers:
       '@ev-agent/api':
         specifier: workspace:*
         version: link:../api
+      '@ev-agent/durability':
+        specifier: workspace:*
+        version: link:../durability
       '@ev-agent/execution':
         specifier: workspace:*
         version: link:../execution
@@ -138,6 +144,12 @@ importers:
         version: link:../durability
 
   packages/plugin-sdk: {}
+
+  packages/push:
+    dependencies:
+      '@ev-agent/durability':
+        specifier: workspace:*
+        version: link:../durability
 
   packages/session:
     dependencies:

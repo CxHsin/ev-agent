@@ -1,0 +1,12 @@
+{
+  "name": "@ev-agent/push",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "dependencies": {
+    "@ev-agent/durability": "workspace:*"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

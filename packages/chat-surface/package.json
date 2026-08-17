@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@ev-agent/api": "workspace:*",
+    "@ev-agent/durability": "workspace:*",
     "@ev-agent/execution": "workspace:*",
     "@ev-agent/model": "workspace:*",
     "@ev-agent/session": "workspace:*",
